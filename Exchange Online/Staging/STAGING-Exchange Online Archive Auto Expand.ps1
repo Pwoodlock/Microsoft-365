@@ -1,0 +1,100 @@
+# Ensure the script is running as an administrator
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+if (-not $isAdmin) {
+    Write-Host "Please run this script as an administrator." -ForegroundColor Red
+    exit
+}
+
+# Install required modules if they are not present
+if (-not (Get-Module -ListAvailable -Name "ExchangeOnlineManagement")) {
+    Install-Module -Name ExchangeOnlineManagement -Force -SkipPublisherCheck
+}
+
+# Import the ExchangeOnlineManagement module
+Import-Module ExchangeOnlineManagement -RequiredVersion 3.3.0
+
+# Attempt to connect to Exchange Online
+try {
+    $connection = Connect-ExchangeOnline -ShowProgress $true
+    if (-not $connection) {
+        Write-Host "Failed to connect to Exchange Online. Please check your credentials and internet connection." -ForegroundColor Red
+        exit
+    } else {
+        Write-Host "Successfully connected to Exchange Online." -ForegroundColor Green
+    }
+} catch {
+    Write-Host "Error connecting to Exchange Online: $($_.Exception.Message)" -ForegroundColor Red
+    exit
+}
+
+function EnableGlobalAutoExpandingArchive() {
+    $globalAutoExpandingArchiveEnabled = Get-OrganizationConfig | Select-Object -ExpandProperty AutoExpandingArchiveEnabled
+    if (-not $globalAutoExpandingArchiveEnabled) {
+        Write-Host "Global Auto Expanding Archive is not enabled. Would you like to enable it globally? (y/n)"
+        if (-ieq 'y') {
+            Set-OrganizationConfig -AutoExpandingArchiveEnabled
+            Write-Host "Global Auto Expanding Archive has been enabled." -ForegroundColor Green
+        } else {
+            Write-Host "Global Auto Expanding Archive remains disabled." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "Global Auto Expanding Archive is already enabled." -ForegroundColor Green
+    }
+}
+
+function RunProcess() {
+    try {
+        $mailboxes = Get-ExoMailbox -ResultSize Unlimited |
+                         Where-Object { $_.RecipientTypeDetails -eq 'UserMailbox' } |
+                         Select-Object DisplayName, ArchiveDatabase, ArchiveStatus
+
+        if (-not $mailboxes) {
+            Write-Host "No mailboxes found or unable to retrieve mailboxes." -ForegroundColor Red
+            return
+        }
+
+        Write-Host ("`n" * 2) -NoNewline
+        Write-Host "List of users with Exchange Licenses:" -ForegroundColor Cyan
+        $count = 0
+        $mailboxes | ForEach-Object {
+            $count++
+            Write-Host ("{0}. {1} - {2}" -f $count, $_.DisplayName, $_.ArchiveStatus) -ForegroundColor Yellow
+        }
+
+        $selectedNumber = Read-Host "`nEnter the number corresponding to the mailbox you'd like to manage"
+        if ($selectedNumber -lt 1 -or $selectedNumber -gt $mailboxes.Count) {
+            Write-Host "Invalid selection. Exiting." -ForegroundColor Red
+            exit
+        }
+
+        $selectedMailbox = $mailboxes[$selectedNumber - 1]
+        Write-Host "`nYou've selected $($selectedMailbox.DisplayName) for enabling Auto Expanding Archive." -ForegroundColor Green
+
+        $confirmation = Read-Host "`nWould you like to enable Auto Expanding Archive for the selected mailbox? (y/n)"
+        if ($confirmation -ieq 'y') {
+            if ($selectedMailbox.ArchiveDatabase -eq $null) {
+                Write-Host "Enabling In-Place Archive for $($selectedMailbox.DisplayName)..." -ForegroundColor Yellow
+                Enable-Mailbox -Identity $selectedMailbox.DisplayName -Archive
+                Write-Host "In-Place Archive has been enabled." -ForegroundColor Green
+            } else {
+                Write-Host "In-Place Archive is already enabled for $($selectedMailbox.DisplayName)." -ForegroundColor Green
+            }
+
+            Enable-Mailbox -Identity $selectedMailbox.DisplayName -AutoExpandingArchive
+            Write-Host "Auto Expanding Archive has been enabled for $($selectedMailbox.DisplayName)." -ForegroundColor Green
+        } else {
+            Write-Host "Auto Expanding Archive was not enabled." -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "An error occurred: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+do {
+    RunProcess
+    $userInput = Read-Host "`nWould you like to pick and activate another user? (y/n)"
+} while ($userInput -ieq 'y')
+
+# Disconnect from Exchange Online
+Disconnect-ExchangeOnline -Confirm:$false
+Write-Host "Disconnected from Exchange Online." -ForegroundColor Green
